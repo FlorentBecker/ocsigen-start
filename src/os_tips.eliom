@@ -64,20 +64,28 @@ let seen_by_user =
        | _ -> Eliom_reference.get tips_seen)
 
 (* Get the set of seen tips *)
-let%server get_tips_seen () = Eliom_reference.Volatile.get seen_by_user
+let%server get_tips_seen () =
+  let%lwt g = Eliom_state.get_persistent_data_session_group () in
+  (match g with
+   | None -> print_endline "________________ NOGROUP"
+   | Some g -> print_endline ("________________ GROUP "^g));
+  (* Eliom_reference.Volatile.get seen_by_user *)
+  Eliom_reference.get tips_seen
 
 (* We cache the set of seen tips to avoid doing the request several times.
    Warning: it is not updated if the user is using several devices or
    tabs at a time which means that the user may see the same tip several
    times in that case. *)
-let%client tips_seen_client_ref = ref Stringset.empty
-let%client get_tips_seen () = Lwt.return !tips_seen_client_ref
+let%client tips_seen_client_init, tips_seen_client_init_u = Lwt.wait ()
+let%client tips_seen_client_ref = ref tips_seen_client_init
+let%client get_tips_seen () = !tips_seen_client_ref
 
 let%server () = Os_session.on_start_connected_process
-    (fun _ ->
-       let%lwt tips = get_tips_seen () in
+    (fun myid ->
+       let%lwt tips = Eliom_reference.get tips_seen in
+       Eliom_reference.Volatile.set seen_by_user (Lwt.return tips);
        ignore [%client (
-         tips_seen_client_ref := ~%tips
+         Lwt.wakeup tips_seen_client_init_u ~%tips
        : unit)];
        Lwt.return ())
 
@@ -90,7 +98,9 @@ let set_tip_seen (name : string) =
   | _ -> Eliom_reference.set tips_seen newset
 
 let%client set_tip_seen name =
-  tips_seen_client_ref := Stringset.add name !tips_seen_client_ref;
+  tips_seen_client_ref :=
+    (let%lwt s = !tips_seen_client_ref in
+     Lwt.return (Stringset.add name s));
   ~%(Eliom_client.server_function
        ~name:"Os_tips.set_tip_seen"
        [%derive.json: string]
@@ -121,7 +131,7 @@ let%server _ =
     (Os_session.Opt.connected_fun (fun myid_o () () -> reset_tips_user myid_o))
 
 let%client reset_tips () =
-  tips_seen_client_ref := Stringset.empty;
+  tips_seen_client_ref := Lwt.return Stringset.empty;
   ~%(Eliom_client.server_function
        ~name:"Os_tips.reset_tips"
        [%derive.json: unit]
